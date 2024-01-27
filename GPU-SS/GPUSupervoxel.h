@@ -5,8 +5,10 @@
 #include <unordered_map>
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
-#include<ctime>
+#include <ctime>
 #include "Texture.h"
+#include <array.h>
+#include <point_3d.h>
 class GPUSupervoxel
 {
 protected:
@@ -76,15 +78,21 @@ protected:
 	void nearest_valid_seed_voxel(std::vector<float>& seeds_3d, int Lloyd_curr_iter);
 	void update_seeds_neighbors();
 	void update_seeds_neighbors_swap();
-	void generate_seg(string& save_path, int* labels, const std::vector<double> &points,
+	void generate_seg(const string& save_path, int* labels, const std::vector<double> &points,
 		const std::vector<double> &normals, int* render_color);
-	void generate_label(string& save_path, int* labels);
+	void generate_label(const string& save_path, int* labels);
+
 public:
 	GPUSupervoxel();
 	~GPUSupervoxel();
 
-	int JFASupervoxel(const std::vector<double> &points,
-		const std::vector<double> &normals, double voxelResolution_, double seedResolution_, double lambda1, double lambda2, string& save_name,int save_type);
+	void GetSupervoxelLabels(int* labels, cl::Array<int> *s_labels);
+	void GetNormalsVector(std::vector<double> &normals, cl::Array<cl::RVector3D> &normals_arr);
+	cl::Array<cl::RPoint3D> GetPointsArray(const std::vector<double> &points);
+	cl::Array<int> GetGtLabelsArray(const std::vector<int> &gt_labels);
+	cl::Array<cl::Array<int>> GetNeighbors(cl::Array<cl::RPoint3D> &points);
+    	
+	int JFASupervoxel(const std::vector<double> &points, std::vector<double> &normals, const std::vector<int> &gt_labels, double voxelResolution_, double seedResolution_, double lambda1, double lambda2, const string& save_name, int save_type, const int max_cluster_iter, const int max_swap_iter, const int k);
 
 	void print_data(vector<float>& data_3d, string& txt_name, int bit);
 	void print_valid(vector<int>& valid_flag);

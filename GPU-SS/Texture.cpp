@@ -1,5 +1,5 @@
 #include "Texture.h"
-
+#include <unistd.h>
 
 
 Texture::Texture()
@@ -22,7 +22,7 @@ void Texture::process_input(GLFWwindow *window)
 	if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS)
 	{
 		printf("next step\n");
-		Sleep(1000);
+		sleep(1000);
 	}
 
 }
@@ -88,10 +88,10 @@ int Texture::init_texture(vector<float>& data_3d, vector<float>& normal_3d, vect
 		return -1;
 	}
 	const GLubyte* OpenGLVersion = glGetString(GL_VERSION);
-	printf("OpenGL version：%s\n", OpenGLVersion);
+	// printf("OpenGL version：%s\n", OpenGLVersion);
 	int value;
 	glGetIntegerv(GL_MAX_3D_TEXTURE_SIZE, &value);
-	printf("GL_MAX_3D_TEXTURE_SIZE：%d\n", value);
+	// printf("GL_MAX_3D_TEXTURE_SIZE：%d\n", value);
 	
 
 	frameBuffer_data = 0;
@@ -406,7 +406,7 @@ void Texture::aver_surface_seg(Shader& aver, vector<float>& seeds_3d, vector<flo
 		seeds_3d[i * 4 + 3] = float(i);
 		//cout <<seeds_3d[i * 4 + 3]<<":"<< seeds_3d[i * 4] << "," << seeds_3d[i * 4 + 1] << "," << seeds_3d[i * 4 + 2]<< endl;
 	}
-	cout << "disappear seeds number:" << dis_num << endl;
+	// cout << "disappear seeds number:" << dis_num << endl;
 	if (res) delete[] res;
 }
 
@@ -486,7 +486,7 @@ void Texture::aver_surface_swap(Shader& aver, vector<float>& seed_cov_info, vect
 		//cout <<seeds_3d[i * 4 + 3]<<":"<< seeds_3d[i * 4] << "," << seeds_3d[i * 4 + 1] << "," << seeds_3d[i * 4 + 2]<< endl;
 	}
 	
-	cout << "disappear seeds number:" << dis_num << endl;
+	// cout << "disappear seeds number:" << dis_num << endl;
 	if (res1) delete[] res1;
 	if (res2) delete[] res2;
 }
@@ -666,7 +666,7 @@ void Texture::label(int*& labels)
 			
 		
 	}
-	cout << "number of voxels without label:" << nolabel_num << endl;
+	// cout << "number of voxels without label:" << nolabel_num << endl;
 	if (res1) delete[] res1;
 }
 

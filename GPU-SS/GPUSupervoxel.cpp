@@ -1,7 +1,11 @@
 #include "GPUSupervoxel.h"
-#include<iostream>
+#include <kd_tree.h>
+#include <point_3d.h>
+#include <evaluate.h>
+#include <iostream>
 #include <numeric> 
-
+#include <algorithm>
+#include <pca_estimate_normals.h>
 
 GPUSupervoxel::GPUSupervoxel()
 {
@@ -43,7 +47,7 @@ void GPUSupervoxel::voxelization(const std::vector<double> &points,
 	width = int((bbox[1] - bbox[0]) / voxelResolution + 1);
 	height = int((bbox[3] - bbox[2]) / voxelResolution + 1);
 	depth = int((bbox[5] - bbox[4]) / voxelResolution + 1);
-	cout << "voxel resolution (width:" << width << ",height:" << height << ",depth:" << depth<<")" << endl;
+	// cout << "voxel resolution (width:" << width << ",height:" << height << ",depth:" << depth<<")" << endl;
 	int slice_num = width * height;
 	int voxel_num = slice_num * depth;
 
@@ -111,7 +115,7 @@ void GPUSupervoxel::voxelization(const std::vector<double> &points,
 	int voxelNumber = (int)voxels.size();
 	width_t = int(sqrt(voxelNumber)) + 1;
 	height_t = width_t;
-	cout << "voxelNumber:" << voxelNumber << ",width_2dTexture:" << width_t << ",height_2dTexture:" << height_t << endl;
+	// cout << "voxelNumber:" << voxelNumber << ",width_2dTexture:" << width_t << ",height_2dTexture:" << height_t << endl;
 	s = int(width_t);
 
 
@@ -160,7 +164,7 @@ void GPUSupervoxel::voxelization(const std::vector<double> &points,
 	superWidth = int((bbox[1] - bbox[0]) / seedResolution + 1);
 	superHeight = int((bbox[3] - bbox[2]) / seedResolution + 1);
 	superDepth = int((bbox[5] - bbox[4]) / seedResolution + 1);
-	cout << "supervoxel resolution (superWidth:" << superWidth << ",superHeight:" << superHeight << ",superDepth:" << superDepth<<")" << endl;
+	// cout << "supervoxel resolution (superWidth:" << superWidth << ",superHeight:" << superHeight << ",superDepth:" << superDepth<<")" << endl;
 
 
 	std::vector<double> superCentroids;
@@ -218,7 +222,7 @@ void GPUSupervoxel::voxelization(const std::vector<double> &points,
 		}
 	}
 	seeds_num = supervoxels.size();
-	cout << "seed number:" << seeds_num << endl;
+	// cout << "seed number:" << seeds_num << endl;
 	seeds_t.resize(seeds_num * 3, -1);//xyid
 
 	int index_w, index_h;
@@ -509,25 +513,109 @@ void GPUSupervoxel::update_seeds_neighbors_swap()
 	}
 }
 
-int GPUSupervoxel::JFASupervoxel(const std::vector<double> &points,
-	const std::vector<double> &normals, double voxelResolution_, double seedResolution_, double lambda1, double lambda2, string& save_name,int save_type)
+void GPUSupervoxel::GetSupervoxelLabels(int* labels, cl::Array<int> *s_labels)
 {
+	int voxelNumber = (int)voxels.size();
+    	
+	for (int pos = 0; pos < voxelNumber; ++pos) // For every voxel
+	{
+		int label = labels[pos];
+	    int memberNumber = (int)voxels[pos].members.size();
+		int mem = 0;
+		for (int i = 0; i < memberNumber; i++) // For all points in the voxel
+		{
+			mem = voxels[pos].members[i]; // Get point idx
+			(*s_labels)[mem] = label; // Set label
+		}
+    }
+}
+
+cl::Array<cl::RPoint3D> GPUSupervoxel::GetPointsArray(const std::vector<double> &points) {
+    cl::Array<cl::RPoint3D> points_arr;
+
+    for (int i = 0; i < points.size(); i += 3) {
+        const double x = points[i];
+        const double y = points[i+1];
+        const double z = points[i+2];
+        cl::RPoint3D cur_point = cl::RPoint3D(x, y, z);
+        points_arr.emplace_back(cur_point);
+    }
+    
+    return points_arr;
+}
+
+cl::Array<int> GPUSupervoxel::GetGtLabelsArray(const std::vector<int> &gt_labels) {
+    cl::Array<int> gt_labels_arr;
+
+    for (int i = 0; i < point_num; i++) {
+        gt_labels_arr.emplace_back(gt_labels[i]);
+    }
+    
+    return gt_labels_arr;
+}
+
+void GPUSupervoxel::GetNormalsVector(std::vector<double> &normals, cl::Array<cl::RVector3D>& normals_arr) {
+    for (int i = 0; i < normals_arr.size(); i++) {    
+        normals.push_back(normals_arr[i].x);
+        normals.push_back(normals_arr[i].y);
+        normals.push_back(normals_arr[i].z);
+    }
+}
+
+int GPUSupervoxel::JFASupervoxel(const std::vector<double> &points, std::vector<double> &normals,
+	const std::vector<int> &gt_labels, double voxelResolution_, double seedResolution_, double lambda1, double lambda2, const string& save_name, int save_type, const int max_cluster_iter, const int max_swap_iter, const int k)
+{
+    //cout << "In the supervoxel algorithm!" << endl;    
+    
+	point_num = (int)points.size() / 3;
+    //cout << "Voxel resolution is " << voxelResolution_ << endl;
+    // cout << "Seed resolution is " << seedResolution_ << endl;
+	cl::Array<cl::RPoint3D> points_arr = GetPointsArray(points);
+    cl::KDTree<cl::RPoint3D> kdtree;
+    kdtree.SwapPoints(&points_arr);
+
+    int k_neighbors = k;
+    cl::Array<cl::RVector3D> normals_arr(point_num);
+    cl::Array<cl::Array<int> > neighbors(point_num);
+    cl::Array<cl::RPoint3D> neighbor_points(k_neighbors);
+    for (int i = 0; i < point_num; ++i) {
+        kdtree.FindKNearestNeighbors(kdtree.points()[i], k_neighbors,
+                                     &neighbors[i]);
+        for (int k = 0; k < k_neighbors; ++k) {
+            neighbor_points[k] = kdtree.points()[neighbors[i][k]];
+        }
+        cl::geometry::point_cloud::PCAEstimateNormal(neighbor_points.begin(),
+                                                     neighbor_points.end(),
+                                                     &normals_arr[i]);
+    }
+    kdtree.SwapPoints(&points_arr);
+    
+    //cout << "After calculating normals and neighborhood" << endl;
+    
+    GetNormalsVector(normals, normals_arr);
+    
+    //cout << "Size of the normals array is " << normals_arr.size() << endl;
+    //cout << "Size of the points array is " << points.size() << endl;
+    
+    assert(normals.size() == points.size());
+        
+    //cout << "After transforming normals to std::vector" << endl;
+    
 	clock_t startTime, endTime, startTotal,endTotal;
 	startTotal = clock();
 	voxelResolution = voxelResolution_;
 	seedResolution = seedResolution_;
-	point_num = (int)points.size() / 3;
 
 	
 	startTime = clock();
 	voxelization(points, normals, voxelResolution, seedResolution);
 	endTime = clock();
-	cout << "voxelization time : " << (double)(endTime - startTime) / CLOCKS_PER_SEC << "s" << endl;
+	// cout << "voxelization time : " << (double)(endTime - startTime) / CLOCKS_PER_SEC << "s" << endl;
 
 	startTime = clock();
 	texture.init_texture(data_3d, normal_3d, voxel_gridId, seed_neighbors, seed_cov_info, width_t, height_t, voxels.size(), min_size);
 	endTime = clock();
-	cout << "loading data to GPU time : " << (double)(endTime - startTime) / CLOCKS_PER_SEC << "s" << endl;
+	// cout << "loading data to GPU time : " << (double)(endTime - startTime) / CLOCKS_PER_SEC << "s" << endl;
 
     startTime = clock();
 	int* render_color = new int[seeds_num * 3];
@@ -544,9 +632,9 @@ int GPUSupervoxel::JFASupervoxel(const std::vector<double> &points,
 	vector<float> seeds_3d;
 	int Lloyd_curr_iter = 0;
 	//set the maximum iteration for Lloyd iteration
-	const int Lloyd_max_iter = 15;
+	const int Lloyd_max_iter = max_cluster_iter;
 	//set the maximum iteration for Swapping iteration
-	const int Swap_max_iter = 10;
+	const int Swap_max_iter = max_swap_iter;
 	bool Lloyd_ends = false;
 	int* voxel_labels = new int[width_t*height_t];
 	
@@ -555,7 +643,7 @@ int GPUSupervoxel::JFASupervoxel(const std::vector<double> &points,
 	while (!Lloyd_ends)
 	{
 		Lloyd_curr_iter++;
-		cout << "Clustering iter" << Lloyd_curr_iter<<":" << endl;
+		// cout << "Clustering iter" << Lloyd_curr_iter<<":" << endl;
 		texture.seg(seg, Lloyd_curr_iter);
 
 		if (Lloyd_curr_iter == Lloyd_max_iter)
@@ -569,18 +657,20 @@ int GPUSupervoxel::JFASupervoxel(const std::vector<double> &points,
 			texture.update_seeds(seed_neighbors);
 		}
 	}
+	
+    //cout << "After clustering phase" << endl;
 
 	//texture.label(voxel_labels);
 	//generate_voxel_seg(save_file_name,labels, points, normals, render_color, Lloyd_curr_iter);
 	endTime = clock();
-	cout << "clustering time : " << (double)(endTime - startTime) / CLOCKS_PER_SEC << "s" << endl;
+	// cout << "clustering time : " << (double)(endTime - startTime) / CLOCKS_PER_SEC << "s" << endl;
 
 	startTime = clock();
 	//You can try to change the parameters before swapping stage
 	//texture.update_params(lambda1*2, lambda2*2);
 	for (int i = 1; i < Swap_max_iter; i++)
 	{
-		cout << "Swapping iter" << i<<":" << endl;
+		// cout << "Swapping iter" << i<<":" << endl;
 		texture.aver_surface_swap(aver_swap, seed_cov_info, seed_valid);
 		texture.update_seed_matrix(seed_cov_info);//update aver_pos in seed_matrix texture
 		texture.cov_matrix(cov, seed_cov_info, seed_valid);
@@ -589,23 +679,85 @@ int GPUSupervoxel::JFASupervoxel(const std::vector<double> &points,
 		texture.update_seeds(seed_neighbors);
 		texture.swapping(swap_comb, i);
 	}
+	
+    //cout << "After swapping normals to std::vector" << endl;
 
 	texture.label(voxel_labels);
 	endTime = clock();
-	cout << "swapping time : " << (double)(endTime - startTime) / CLOCKS_PER_SEC << "s" << endl;
+	// cout << "swapping time : " << (double)(endTime - startTime) / CLOCKS_PER_SEC << "s" << endl;
 	endTotal = clock();
-	cout << "total time of algorithm : " << (double)(endTotal - startTotal) / CLOCKS_PER_SEC << "s" << endl;
+	// cout << "total time of algorithm : " << (double)(endTotal - startTotal) / CLOCKS_PER_SEC << "s" << endl;
 	
 	if (save_type == 0) {
 		//generate the label of the points, then evaluate supervoxel performance
 		generate_label(save_name, voxel_labels);
-		cout<<"save label in: "<<save_name<<endl;
+		// cout<<"save label in: "<<save_name<<endl;
 	}
 	else if(save_type==1)
-	{
+	{		
 		//generate the position and color of the points, show it in CloudCompare software
-		generate_seg(save_name, voxel_labels, points, normals, render_color);
-		cout << "save visualization in: " << save_name << endl;
+		//cout << "The size of voxels labels is " << width_t*height_t << endl; // Same as number of voxels.
+		//cout << "The size of points is " << points.size() << ". Divided by 3 is " << (int) points.size() / 3 << endl;
+		int n_voxels = 0;
+		for (int i = 0; i < voxels.size(); i++) {
+		    if (voxels[i].id != -1) n_voxels++;
+		}
+		//cout << "The number of voxels is " << n_voxels << endl;
+		
+		int num_supervoxels = 0;
+		for (int j = 0; j < supervoxels.size(); j++) {
+		    if (supervoxels[j].id != -1) num_supervoxels++;
+		}
+
+		// voxelMap is a map from voxel to supervoxel!
+		
+		std::vector<int> distinct_voxel_labels;
+		// int* voxel_labels = new int[width_t*height_t];
+		// TODO: shouldnt this be just pos++ instead of ++pos???
+		int voxelNumber = (int)voxels.size();
+		for (int pos = 0; pos < voxelNumber; ++pos) // for all voxels
+	    {
+	        int cur_label = voxel_labels[pos];
+		    if (std::find(distinct_voxel_labels.begin(), distinct_voxel_labels.end(), cur_label) == distinct_voxel_labels.end()) {
+		        distinct_voxel_labels.push_back(voxel_labels[pos]);
+		    }
+	    }
+	    
+	    //cout << "After finding distinct voxels and supervoxels" << endl;
+		
+		// cout << "The number of distinct voxel labels is " << distinct_voxel_labels.size() << endl;
+		
+		// vector<int> s_labels;
+		cl::Array<int> s_labels(point_num);
+		GetSupervoxelLabels(voxel_labels, &s_labels); // s_labels is the supervoxel label for every points.
+		
+	    //cout << "After getting supervoxel labels" << endl;
+		// voxelLabels == s_labels
+		// cout << "Number of elements in the s_labels array is " << s_labels.size() << endl;
+		//cout << "First element of s_labels is: " << s_labels[0] << endl;
+		
+		//cl::Array<cl::RPoint3D> points_arr = GetPointsArray(points);
+		//cout << "Number of elements in the points_arr array is " << points_arr.size() << endl;
+		//cout << "First element of points_arr is: " << points_arr[0][0] << " " << points_arr[0][1] << " " << points_arr[0][2] << endl;
+		
+		cl::Array<int> gt_labels_arr = GetGtLabelsArray(gt_labels);
+	    //cout << "After getting ground truth labels" << endl;
+		//cout << "Number of elements in the gt_labels_arr array is " << gt_labels_arr.size() << endl;
+		
+		// TODO: is pretty slow, especially compared to the other BPSS implementation?!
+        
+        //cl::Array<cl::Array<int>> neighbors = GetNeighbors(points_arr);
+		//cout << "Number of elements in the neighbors array is " << neighbors.size() << endl;
+		//cout << "Each point has  " << neighbors[0].size() << " nearest neighbors computed" << endl;
+		
+		const double e = 0.03;
+		int n_supervoxels = distinct_voxel_labels.size();
+		cout << n_supervoxels << " ";
+		//cout << "Number of elements in the points_arr Array is " << points_arr.size() << endl;
+		cl::geometry::util::PrintMetrics(points_arr, gt_labels_arr, s_labels, neighbors, k, e, n_supervoxels);
+
+		//generate_seg(save_name, voxel_labels, points, normals, render_color);
+		//cout << "save visualization in: " << save_name << endl;
 	}
 	
 
@@ -614,22 +766,101 @@ int GPUSupervoxel::JFASupervoxel(const std::vector<double> &points,
 	return 0;
 }
 
-void GPUSupervoxel::generate_label(string& save_file_name, int* labels)
+// TODO: empties points array???
+cl::Array<cl::Array<int>> GPUSupervoxel::GetNeighbors(cl::Array<cl::RPoint3D> &points) {
+    cl::KDTree<cl::RPoint3D> kdtree;
+    kdtree.SwapPoints(&points);
+
+    int k_neighbors = 5;
+    cl::Array<cl::Array<int> > neighbors(point_num);
+    cl::Array<cl::RPoint3D> neighbor_points(k_neighbors);
+    for (int i = 0; i < point_num; ++i) {
+        kdtree.FindKNearestNeighbors(kdtree.points()[i], k_neighbors,
+                                     &neighbors[i]);
+        for (int k = 0; k < k_neighbors; ++k) {
+            neighbor_points[k] = kdtree.points()[neighbors[i][k]];
+        }
+    }
+    
+    return neighbors;
+}
+
+//bool HasMatchingBoundaryPoint(RPoint3D p, int idx, const Array<RPoint3D>& points, const Array <int>& s_boundaries, const double e) {
+//    for (int i = 0; i < s_boundaries.size(); i++) {
+//        if (Distance(p, points[s_boundaries[i]]) < e) {
+//            return true;
+//        }
+//    }
+//    return false;
+//}
+
+//bool HasDifferentLabel(const int& label, const Array<int>& labels, const Array<int>& neighbors) {
+    // assert(neighbors.size() == 15); not true for variable k!
+//    for (int i = 0; i < neighbors.size(); i++) {
+//        if (labels[neighbors[i]] != label) {
+//            return true;
+//        }
+//    }
+//    return false;
+//}
+
+//void GetBoundaryPoints(const std::vector<int> &labels, const std::vector<int> &gt_labels) {
+//    for (int i = 0; i < labels.size(); i++) {
+//        if (HasDifferentLabel(labels[i], labels, neighbors[i])) {
+//            boundaries->push_back(i);
+//        }
+//    }
+//}
+
+//void PrintBoundaryRecall(const std::vector <int> &gt_labels, const std::vector <int> &s_labels, const std::vector <int> &gt_labels) {
+     // Get gt boundaries
+//    vector<int> gt_boundaries; // indices of points
+//    GetBoundaryPoints(gt_labels, neighbors, &gt_boundaries);
+    // LOG(INFO) << "There are " << gt_boundaries.size() << " ground truth boundary points.";
+    
+    // Get s boundaries
+//    vector<int> s_boundaries;
+//    GetBoundaryPoints(s_labels, neighbors, &s_boundaries);
+    // LOG(INFO) << "There are " << s_boundaries.size() << " supervoxel boundary points.";
+    
+    // Loop over all gt bounadries points and check if there exists a s boundary point with less than e distance
+    // Divide by total number of boundary points in gt
+    // For all points that are gt boundary:
+    //      Check if there exists a point in the supervoxel boundaries, for which the distance towards it is less then e
+//    int count = 0;
+//    for (int i = 0; i < gt_boundaries.size(); i++) {
+//        if (HasMatchingBoundaryPoint(points[gt_boundaries[i]], i, points, s_boundaries, e)) {
+//            count++;
+//        }
+        
+    //    if (count > 0 && count % 1000 == 0) {
+    //        LOG(INFO) << count << " matching boundary points are found!";
+    //    }
+//    }
+    
+//    double br = (double) count / gt_boundaries.size();
+    
+    // LOG(INFO) << "The number of matched boundary points is " << count;
+//    cout << std::setprecision(3) << "Boundary recall is " << br << endl;
+//}
+
+void GPUSupervoxel::generate_label(const string& save_file_name, int* labels)
 {
 	int voxelNumber = (int)voxels.size();
 	int slice_num = width * height;
 	std::vector<double> p_label;
 	p_label.resize(point_num, -1);
 
-	for (int pos = 0; pos < voxelNumber; ++pos)
+	for (int pos = 0; pos < voxelNumber; ++pos) // for all voxels
 	{
 		int label = labels[pos];
+		//cout << "Current label is " << label << endl;
 		int memberNumber = (int)voxels[pos].members.size();
 		int mem = 0;
-		for (int i = 0; i < memberNumber; i++)
+		for (int i = 0; i < memberNumber; i++) // for all points in the voxel
 		{
-			mem = voxels[pos].members[i];
-			p_label[mem] = label;
+			mem = voxels[pos].members[i]; // get point idx
+			p_label[mem] = label; // set label for the points
 		}
 	}
 
@@ -642,17 +873,21 @@ void GPUSupervoxel::generate_label(string& save_file_name, int* labels)
 
 }
 
-void GPUSupervoxel::generate_seg(string& save_file_name, int* labels, const std::vector<double> &points, const std::vector<double> &normals, int* render_color)
+void GPUSupervoxel::generate_seg(const string& save_file_name, int* labels, const std::vector<double> &points, const std::vector<double> &normals, int* render_color)
 {
 	std::vector<int> p_color;
 	p_color.resize(point_num * 3, -1);
 	int voxelNumber = (int)voxels.size();
 	int slice_num = width * height;
 
+    int p_count = 0;
 	for (int pos = 0; pos < voxelNumber; ++pos)
 	{
 		int label = labels[pos];
+		// if (pos < 100) cout << "Current label is " << label << endl;
+				
 		int memberNumber = (int)voxels[pos].members.size();
+		p_count += memberNumber;
 		int r_ = render_color[label * 3], g_ = render_color[label * 3 + 1], b_ = render_color[label * 3 + 2];
 		for (int i = 0; i < memberNumber; i++)
 		{
@@ -662,6 +897,14 @@ void GPUSupervoxel::generate_seg(string& save_file_name, int* labels, const std:
 			p_color[mem * 3 + 2] = b_;
 		}
 	}
+	
+	//for (int pos = 0; pos < voxelNumber; ++pos)
+	//{
+	//	int label = labels[pos];
+	//	if (pos < 100) cout << "Second loop over labels: Current label is " << label << endl;
+    //}
+	
+	assert(p_count == point_num);
 
 	ofstream f_debug(save_file_name);
 	for (int i = 0; i < point_num; i++)
